@@ -2100,9 +2100,9 @@ def TestFactory(xla_backend,
     def testSetSharding(self):
       c = self._NewComputation()
       sharding = xla_client.OpSharding()
-      sharding.type = sharding.type.REPLICATED
-      sharding.tile_assignment_dimensions.extend([1])
-      sharding.tile_assignment_devices.extend([0])
+      sharding.type = xla_client.OpSharding.Type.REPLICATED
+      sharding.tile_assignment_dimensions = [1]
+      sharding.tile_assignment_devices = [0]
       c.set_sharding(sharding)
       x = ops.Parameter(c, 0, xla_client.shape_from_pyval(NumpyArrayF32(2.0)))
       c.clear_sharding()
@@ -2335,6 +2335,7 @@ def TestFactory(xla_backend,
 
     def testPlatformVersion(self):
       version = self.backend.platform_version
+      logging.info("platform_version:\n%s", version)
       if self.backend.platform == "cpu":
         self.assertEqual(version, "<unknown>")
       elif self.backend.platform == "gpu":
@@ -2345,6 +2346,9 @@ def TestFactory(xla_backend,
               msg=f"Expected CUDA version string; got {repr(version)}")
         else:
           self.assertEqual(version, "<unknown>")
+      elif self.backend.platform == "tpu" and not cloud_tpu:
+        self.assertIn("tpu", version.lower())
+        self.assertIn("cl/", version)
 
     @unittest.skipIf(cloud_tpu or tfrt_tpu, "not implemented")
     def testExecutableSerialization(self):

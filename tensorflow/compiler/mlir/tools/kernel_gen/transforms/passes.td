@@ -75,6 +75,11 @@ def ComputeOpAndFuncBufferizePass : Pass<"computeop-and-func-bufferize", "Module
   let constructor = "transforms::CreateComputeOpAndFuncBufferizePass()";
 }
 
+def TiledLoopBufferizePass : FunctionPass<"tiled-loop-bufferize"> {
+  let summary = "Pass to bufferize linalg.tiled_loop with the ops inside it.";
+  let constructor = "transforms::CreateTiledLoopBufferizePass()";
+}
+
 def FinalBufferizePass : Pass<"final-bufferize", "ModuleOp"> {
   let summary = "Pass to transform late operations on values to buffer based "
                 "ones.";
@@ -183,6 +188,17 @@ def VectorizationCleanupPass : FunctionPass<"vectorization-cleanup"> {
     VectorizationPass creates some memory transfers that are unneeded but cannot
     be safely removed by current generic infrastructure. This removes the
     specific operations.
+  }];
+}
+
+def CopyCleanupPass : FunctionPass<"copy-cleanup"> {
+  let summary = "Pass to remove copies which are consumed by a GenericOp.";
+  let constructor = "transforms::CreateCopyCleanupPass()";
+  let description = [{
+    We can have GenericOps which have operands that are a copy, but the copy is
+    not used by any other op. In this case, the GenericOp can just use the
+    buffer which is the source of the copy, and we can remove the Alloc and the
+    copy.
   }];
 }
 

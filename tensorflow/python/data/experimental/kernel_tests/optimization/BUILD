@@ -1,11 +1,7 @@
 # Definitions are loaded separately so that copybara can pattern match (and modify) each definition.
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")  # buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_py_test")  # buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.default.bzl", "cuda_py_test", "tf_py_test")
 
-package(
-    default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],
-)
+package(licenses = ["notice"])
 
 tf_py_test(
     name = "filter_fusion_test",
@@ -116,6 +112,25 @@ tf_py_test(
 )
 
 tf_py_test(
+    name = "filter_parallelization_test",
+    size = "medium",
+    srcs = ["filter_parallelization_test.py"],
+    deps = [
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:dtypes",
+        "//tensorflow/python:errors",
+        "//tensorflow/python:functional_ops",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:script_ops",
+        "//tensorflow/python:sparse_tensor",
+        "//tensorflow/python/data/experimental/ops:testing",
+        "//tensorflow/python/data/kernel_tests:checkpoint_test_base",
+        "//tensorflow/python/data/kernel_tests:test_base",
+        "//tensorflow/python/data/ops:dataset_ops",
+    ],
+)
+
+tf_py_test(
     name = "make_deterministic_test",
     size = "small",
     srcs = ["make_deterministic_test.py"],
@@ -158,6 +173,8 @@ tf_py_test(
     size = "small",
     srcs = ["optimization_test.py"],
     shard_count = 2,
+    # TODO(b/200273447): Re-enable.
+    tags = ["notsan"],  # Seems flaky in TSAN.
     deps = [
         "//tensorflow/python:array_ops",
         "//tensorflow/python:client_testlib",

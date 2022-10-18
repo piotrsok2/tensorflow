@@ -18,8 +18,6 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "tensorflow/core/framework/full_type.pb.h"
-#include "tensorflow/core/framework/full_type_util.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/framework/versions.pb.h"
@@ -119,27 +117,17 @@ NodeBuilder& NodeBuilder::XlaCluster(StringPiece xla_cluster) {
   return *this;
 }
 
-namespace {
-
-StatusOr<FullTypeDef> run_type_constructor(
-    const tensorflow::OpRegistrationData& op_reg_data,
-    const NodeDef& node_def) {
-  static FullTypeDef no_type;
-
-  // TODO(mdan): Decouple this from graph building, or run again after.
-  if (op_reg_data.type_ctor == nullptr) {
-    return no_type;
-  }
-
-  // TODO(mdan): Do we still need to save this info in the Graph object?
-  return full_type::SpecializeType(AttrSlice(node_def), op_reg_data.op_def);
+StatusOr<Node*> NodeBuilder::Finalize(Graph* graph, bool consume) {
+  Node* out;
+  TF_RETURN_IF_ERROR(Finalize(graph, &out, consume));
+  return out;
 }
-
-}  // namespace
 
 Status NodeBuilder::Finalize(Graph* graph, Node** created_node, bool consume) {
   // In case of error, set *created_node to nullptr.
-  if (created_node != nullptr) *created_node = nullptr;
+  if (created_node != nullptr) {
+    *created_node = nullptr;
+  }
   if (!errors_.empty()) {
     return errors::InvalidArgument(absl::StrJoin(errors_, "\n"));
   }
@@ -150,20 +138,7 @@ Status NodeBuilder::Finalize(Graph* graph, Node** created_node, bool consume) {
   TF_RETURN_IF_ERROR(
       CheckOpDeprecation(def_builder_.op_def(), graph->versions().producer()));
 
-  const auto* op_registry = graph->op_registry();
-  const tensorflow::OpRegistrationData* op_reg_data;
-  TF_RETURN_IF_ERROR(op_registry->LookUp(node_def.op(), &op_reg_data));
-
-  const auto ctor_type = run_type_constructor(*op_reg_data, node_def);
-  TF_RETURN_IF_ERROR(ctor_type.status());
-  const FullTypeDef ctor_typedef = ctor_type.ValueOrDie();
-  if (ctor_typedef.type_id() != TFT_UNSET) {
-    *(node_def.mutable_experimental_type()) = ctor_typedef;
-  }
-
-  Status status;
-  Node* node = graph->AddNode(std::move(node_def), &status);
-  TF_RETURN_IF_ERROR(status);
+  TF_ASSIGN_OR_RETURN(Node * node, graph->AddNode(std::move(node_def)));
 
   node->set_assigned_device_name(assigned_device_);
 
@@ -178,7 +153,7 @@ Status NodeBuilder::Finalize(Graph* graph, Node** created_node, bool consume) {
 
   if (created_node != nullptr) *created_node = node;
 
-  return Status::OK();
+  return OkStatus();
 }
 
 void NodeBuilder::AddIndexError(const Node* node, int i) {

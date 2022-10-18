@@ -31,6 +31,10 @@ tensorflow::Status SetTpuOpsStructFns(void* library_handle) {
   TFTPU_SET_FN(ops_api_fn, TpuMeshState_Free);
   TFTPU_SET_FN(ops_api_fn, TpuMeshState_MeshCommonState);
 
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngineState_Create);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngineState_Free);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngineState_GetState);
+
   TFTPU_SET_FN(ops_api_fn, TpuCompile_CompileAndBuild);
   TFTPU_SET_FN(ops_api_fn, TpuCompile_XrtCompileAndBuild);
 
@@ -91,14 +95,30 @@ tensorflow::Status SetTpuOpsStructFns(void* library_handle) {
   TFTPU_SET_FN(ops_api_fn, TfTpuOrdinalSelector_DequeueFromCoreSelector);
   TFTPU_SET_FN(ops_api_fn, TfTpu_GetTpuPartitionedCallParams);
 
-  return tensorflow::Status::OK();
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_ExecutePartitioner);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_ConfigureMemory);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_CollateMemory);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_ConfigureHost);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_ConnectHosts);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_Finalize);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_IsInitialized);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_WriteParameters);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_ReadParameters);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingTensorBatchFixedState_Create);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingTensorBatchFixedState_Destroy);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_EnqueueTensorBatch);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_RecvActivationsComputation);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_RecvTPUEmbeddingDeduplicationDataComputation);
+  TFTPU_SET_FN(ops_api_fn, TpuEmbeddingEngine_SendTPUEmbeddingGradientsComputation);
+
+  return tensorflow::OkStatus();
 }
 
 tensorflow::Status InitializeTpuStructFns(void* library_handle) {
   TF_RETURN_IF_ERROR(SetTpuOpsStructFns(library_handle));
   TF_RETURN_IF_ERROR(SetExecutorStructFn(library_handle));
 
-  return tensorflow::Status::OK();
+  return tensorflow::OkStatus();
 }
 
 }  // namespace

@@ -11,17 +11,7 @@ load(
     "tf_copts",
     "tf_cuda_library",
 )
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_test")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_generate_proto_text_sources")
-
-# buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.default.bzl", "filegroup", "tf_cuda_cc_test", "tf_generate_proto_text_sources")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "if_static",
@@ -36,6 +26,8 @@ package(
     default_visibility = [
         "//tensorflow/core:__subpackages__",
         "//tensorflow/security/fuzzing:__subpackages__",
+        # TODO(pedaveeraiah): to be removed when summary.proto.h deps moves to TSL
+        "//tensorflow/tsl/lib:__subpackages__",
     ],
     licenses = ["notice"],
 )
@@ -45,7 +37,6 @@ package(
 exports_files(
     srcs = [
         "allocator_registry.h",
-        "cancellation.h",
         "collective.h",
         "control_flow.h",
         "dataset.h",
@@ -74,6 +65,7 @@ exports_files(
         "queue_interface.h",
         "reader_interface.h",
         "reader_op_kernel.h",
+        "ref_var.h",
         "register_types_traits.h",
         "rendezvous.h",
         "resource_mgr.h",
@@ -157,6 +149,7 @@ exports_files(
         "op.h",
         "op_def_builder.h",
         "full_type_util.h",
+        "full_type_inference_util.h",
         "op_def_util.h",
         "shape_inference.h",
     ],
@@ -185,6 +178,7 @@ filegroup(
         "device.h",
         "device_base.h",
         "device_factory.h",
+        "full_type_inference_util.h",
         "full_type_util.h",
         "function.h",
         "function_handle_cache.h",
@@ -216,6 +210,7 @@ filegroup(
         "queue_interface.h",
         "reader_interface.h",
         "reader_op_kernel.h",
+        "ref_var.h",
         "register_types.h",
         "register_types_traits.h",
         "rendezvous.h",
@@ -250,13 +245,13 @@ filegroup(
         "versions.h",
         "//tensorflow/core/framework/registration:options.h",
         "//tensorflow/core/framework/registration:registration.h",
+        "//tensorflow/tsl/framework:device_type.h",
     ],
 )
 
 filegroup(
     name = "framework_internal_impl_srcs",
     srcs = [
-        "cancellation.cc",
         "collective.cc",
         "dataset.cc",
         "device.cc",
@@ -279,6 +274,7 @@ filegroup(
         "op_kernel.cc",
         "op_segment.cc",
         "ops_util.cc",
+        "ref_var.cc",
         "rendezvous.cc",
         "resource_mgr.cc",
         "resource_var.cc",
@@ -294,14 +290,11 @@ filegroup(
 filegroup(
     name = "mobile_srcs_no_runtime",
     srcs = [
-        "allocator.cc",
         "allocator.h",
-        "allocator_registry.cc",
         "allocator_registry.h",
         "bfloat16.cc",
         "bfloat16.h",
         "bounds_check.h",
-        "cpu_allocator_impl.cc",
         "kernel_shape_util.cc",
         "kernel_shape_util.h",
         "log_memory.cc",
@@ -320,7 +313,6 @@ filegroup(
         "tensor_shape.cc",
         "tensor_shape.h",
         "tensor_types.h",
-        "tracking_allocator.cc",
         "tracking_allocator.h",
         "type_index.h",
         "type_traits.h",
@@ -335,6 +327,7 @@ filegroup(
         "variant_op_registry.h",
         "variant_tensor_data.cc",
         "variant_tensor_data.h",
+        "//tensorflow/tsl/framework:device_type.h",
     ],
 )
 
@@ -343,7 +336,6 @@ filegroup(
     srcs = [
         "attr_value_util.cc",
         "attr_value_util.h",
-        "cancellation.cc",
         "cancellation.h",
         "collective.cc",
         "collective.h",
@@ -359,6 +351,8 @@ filegroup(
         "device_base.h",
         "device_factory.cc",
         "device_factory.h",
+        "full_type_inference_util.cc",
+        "full_type_inference_util.h",
         "full_type_util.cc",
         "full_type_util.h",
         "function.cc",
@@ -409,6 +403,8 @@ filegroup(
         "reader_base.h",
         "reader_interface.h",
         "reader_op_kernel.h",
+        "ref_var.cc",
+        "ref_var.h",
         "register_types_traits.h",
         "rendezvous.cc",
         "rendezvous.h",
@@ -471,12 +467,6 @@ filegroup(
 # applications that want to depend on a minimal subset of TensorFlow (e.g. XLA).
 cc_library(
     name = "allocator",
-    srcs = [
-        "allocator.cc",
-        "allocator_registry.h",
-        "tracking_allocator.cc",
-        "tracking_allocator.h",
-    ],
     hdrs = [
         "allocator.h",
     ],
@@ -487,6 +477,7 @@ cc_library(
         ":type_traits",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:optional",
+        "//tensorflow/tsl/framework:allocator",
     ] + if_static(
         extra_deps = [
             ":allocator_registry_impl",
@@ -515,30 +506,9 @@ cc_library(
 # as otherwise duplicate registration in the registry will cause crashes.
 cc_library(
     name = "allocator_registry_impl",
-    srcs = [
-        "allocator.h",
-        "allocator_registry.cc",
-        "allocator_registry.h",
-        "cpu_allocator_impl.cc",
-        "tracking_allocator.h",
-    ],
     visibility = ["//tensorflow/core:__subpackages__"],
     deps = [
-        ":numeric_types",
-        ":type_traits",
-        "//tensorflow/core/lib/gtl:inlined_vector",
-        "//tensorflow/core/lib/strings:strcat",
-        "//tensorflow/core/lib/strings:stringprintf",
-        "//tensorflow/core/platform:logging",
-        "//tensorflow/core/platform:macros",
-        "//tensorflow/core/platform:mutex",
-        "//tensorflow/core/platform:platform_port",
-        "//tensorflow/core/platform:thread_annotations",
-        "//tensorflow/core/platform:types",
-        "//tensorflow/core/profiler/lib:scoped_memory_debug_annotation",
-        "//tensorflow/core/profiler/lib:traceme",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/types:optional",
+        "//tensorflow/tsl/framework:allocator_registry_impl",
     ],
     alwayslink = 1,
 )
@@ -649,6 +619,31 @@ cc_library(
 )
 
 cc_library(
+    name = "float8",
+    srcs = ["float8.cc"],
+    hdrs = ["float8.h"],
+    visibility = [
+        "//tensorflow/core:__subpackages__",
+        "//tensorflow/security/fuzzing:__subpackages__",
+    ],
+    deps = [
+        "//third_party/eigen3",
+    ],
+    alwayslink = 1,
+)
+
+tf_cc_test(
+    name = "float8_test",
+    srcs = ["float8_test.cc"],
+    deps = [
+        ":float8",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:test_benchmark",
+    ],
+)
+
+cc_library(
     name = "numeric_types",
     hdrs = ["numeric_types.h"],
     visibility = [
@@ -657,7 +652,7 @@ cc_library(
     ],
     deps = [
         "//tensorflow/core/platform:types",
-        "//third_party/eigen3",
+        "//tensorflow/tsl/framework:numeric_types",
     ],
 )
 
@@ -697,6 +692,7 @@ cc_library(
         "//tensorflow/core/platform:errors",
         "//tensorflow/core/platform:logging",
         "//tensorflow/core/platform:macros",
+        "//tensorflow/core/platform:statusor",
         "//tensorflow/core/util:overflow",
         "//third_party/eigen3",
     ],
@@ -730,11 +726,15 @@ cc_library(
         "//tensorflow/core/lib/core:errors",
         "//tensorflow/core/lib/strings:strcat",
         "//tensorflow/core/platform:casts",
+        "//tensorflow/core/platform:errors",
         "//tensorflow/core/platform:intrusive_ptr",
+        "//tensorflow/core/platform:macros",
+        "//tensorflow/core/platform:platform_port",
         "//tensorflow/core/platform:statusor",
         "//tensorflow/core/platform:tensor_coding",
         "//tensorflow/core/platform:types",
         "//tensorflow/core/util:managed_stack_trace",
+        "@com_google_absl//absl/strings:str_format",
     ],
     alwayslink = 1,
 )
@@ -745,6 +745,8 @@ tf_cc_test(
     srcs = ["resource_handle_test.cc"],
     deps = [
         ":resource_handle",
+        ":resource_handle_proto_cc",
+        ":tensor_shape_proto_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
     ],
@@ -778,6 +780,7 @@ cc_library(
     deps = [
         ":numeric_types",
         "//tensorflow/core/platform:types",
+        "//tensorflow/tsl/framework:type_traits",
     ],
 )
 
@@ -806,7 +809,7 @@ tf_cuda_library(
     visibility = [
         "//tensorflow/core:__pkg__",
         "//tensorflow/core/runtime_fallback:__subpackages__",
-        "//tensorflow/core/tfrt/utils:__subpackages__",
+        "//tensorflow/core/tfrt:__subpackages__",
         "//tensorflow/core/util:__pkg__",
         "//tensorflow/security/fuzzing:__subpackages__",
     ],
@@ -848,6 +851,7 @@ tf_cuda_library(
         "//tensorflow/core/platform:types",
         "//tensorflow/core/public:version",
         "//tensorflow/core/util:managed_stack_trace",
+        "//tensorflow/tsl/framework:device_type",
         "//third_party/eigen3",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
@@ -863,19 +867,14 @@ cc_library(
         ":bounds_check",
         ":full_type_proto_cc",
         ":full_type_util",
-        ":node_def_proto_cc",
         ":node_def_util",
         ":op_def_proto_cc",
-        ":tensor",
         ":tensor_shape",
         ":tensor_shape_proto_cc",
         "//tensorflow/core/lib/core:errors",
         "//tensorflow/core/lib/core:status",
-        "//tensorflow/core/lib/gtl:inlined_vector",
-        "//tensorflow/core/lib/strings:numbers",
-        "//tensorflow/core/lib/strings:scanner",
-        "//tensorflow/core/lib/strings:str_util",
         "//tensorflow/core/platform:macros",
+        "//tensorflow/core/util:overflow",
         "@com_google_absl//absl/memory",
     ],
 )
@@ -929,6 +928,7 @@ cc_library(
         "//tensorflow/core/lib/hash",
         "//tensorflow/core/lib/strings:proto_serialization",
         "//tensorflow/core/lib/strings:str_util",
+        "//tensorflow/core/platform:fingerprint",
         "//tensorflow/core/platform:protobuf",
         "@com_google_absl//absl/strings",
     ],
@@ -1001,6 +1001,7 @@ cc_library(
         ":node_def_proto_cc",
         ":node_def_util",
         ":op",
+        ":op_def_builder",
         ":op_def_proto_cc",
         ":tensor",
         "//tensorflow/core/lib/core:status",
@@ -1014,6 +1015,7 @@ cc_library(
     deps = [
         ":attr_value_proto_cc",
         ":attr_value_util",
+        ":full_type_proto_cc",
         ":op_def_proto_cc",
         ":op_def_util",
         ":tensor",
@@ -1030,10 +1032,24 @@ cc_library(
     ],
 )
 
+# TODO(mdan): Move these into a separate directory.
 cc_library(
     name = "full_type_util",
-    srcs = ["full_type_util.cc"],
-    hdrs = ["full_type_util.h"],
+    srcs = [
+        "full_type_inference_util.cc",
+        "full_type_util.cc",
+    ],
+    hdrs = [
+        "full_type_inference_util.h",
+        "full_type_util.h",
+    ],
+    visibility = [
+        "//tensorflow/core:__subpackages__",
+        "//tensorflow/security/fuzzing:__subpackages__",
+        # Necessary for calling REGISTER_OP with SetTypeConstructor
+        # http://yaqs/4779722181477138432
+        "//intelligence/brella/analytics/sql/tensorflow:__pkg__",
+    ],
     deps = [
         ":attr_value_proto_cc",
         ":full_type_proto_cc",
@@ -1042,9 +1058,13 @@ cc_library(
         ":op_def_builder",
         ":op_def_proto_cc",
         ":tensor",
-        ":types_proto_cc",
+        "//tensorflow/core/platform:errors",
+        "//tensorflow/core/platform:hash",
+        "//tensorflow/core/platform:status",
         "//tensorflow/core/platform:statusor",
         "//tensorflow/core/protobuf:error_codes_proto_impl_cc",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -1088,6 +1108,7 @@ exports_files(
         "allocator.h",
         "bfloat16.h",
         "bounds_check.h",
+        "cancellation.h",
         "fake_input.h",
         "function_testlib.h",
         "log_memory.h",
@@ -1217,6 +1238,19 @@ tf_cc_test(
     ],
 )
 
+tf_cc_test(
+    name = "framework_resource_var_test",
+    size = "small",
+    srcs = ["resource_var_test.cc"],
+    linkstatic = tf_kernel_tests_linkstatic(),
+    deps = [
+        "//tensorflow/core:framework_internal",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+    ],
+)
+
 cc_library(
     name = "op_kernel_test_base",
     testonly = True,
@@ -1253,11 +1287,12 @@ tf_cc_tests(
         "attr_value_util_test.cc",
         "batch_util_test.cc",
         "bfloat16_test.cc",
-        "cancellation_test.cc",
         "common_shape_fns_test.cc",
         "dataset_test.cc",
         "device_base_test.cc",
         "disable_jit_test.cc",
+        "full_type_inference_util_test.cc",
+        "full_type_util_test.cc",
         "function_test.cc",
         "graph_def_util_test.cc",
         "graph_to_functiondef_test.cc",
@@ -1307,6 +1342,7 @@ tf_cc_tests(
         "//tensorflow/cc:scope",
         "//tensorflow/cc:sendrecv_ops",
         "//tensorflow/cc:while_loop",
+        "//tensorflow/compiler/tf2xla/ops:xla_ops",
         "//tensorflow/core",
         "//tensorflow/core:core_cpu",
         "//tensorflow/core:core_cpu_internal",
@@ -1321,7 +1357,9 @@ tf_cc_tests(
         "//tensorflow/core:testlib",
         "//tensorflow/core/common_runtime:direct_session_internal",
         "//tensorflow/core/kernels:ops_util",
+        "//tensorflow/core/lib/monitoring:cell_reader",
         "//tensorflow/core/platform:regexp",
+        "//tensorflow/core/platform:status_matchers",
         "//tensorflow/core/profiler/lib:profiler_session",
         "//tensorflow/core/profiler/protobuf:memory_profile_proto_cc",
         "//tensorflow/core/profiler/utils:xplane_schema",
@@ -1346,6 +1384,21 @@ cc_library(
         "//tensorflow/python/client:__pkg__",
         "//tensorflow/python/util:__pkg__",
     ],
+)
+
+# For a more maintainable build this target should not exist and the headers
+# should  be split into the existing cc_library targets, but this change was
+# automatically  done so that we can remove long standing issues and complexity
+# in the build system. It's up to the OWNERS of this package to get rid of it or
+# not. The use of the textual_hdrs attribute is discouraged, use hdrs instead.
+# Here it is used to avoid header parsing errors in packages where the feature
+# parse_headers was enabled since loose headers were not being parsed. See
+# go/loose-lsc-one-target-approach for more details.
+cc_library(
+    name = "loose_headers",
+    tags = ["avoid_dep"],
+    textual_hdrs = ["op_gen_lib.h"],
+    visibility = ["//tensorflow/c:__pkg__"],
 )
 
 # All framewrok protos are self-contained, i.e. they only import other
@@ -1701,6 +1754,17 @@ tf_proto_library(
     ],
 )
 
+# copybara:uncomment_begin(google-only)
+# py_proto_library(
+#     name = "function_proto_py_pb2",
+#     has_services = 0,
+#     api_version = 2,
+#     deps = [
+#         ":function_proto",
+#     ],
+# )
+# copybara:uncomment_end
+
 tf_proto_library(
     name = "summary_proto",
     srcs = ["summary.proto"],
@@ -1711,7 +1775,9 @@ tf_proto_library(
         ":tensor_proto",
         ":tensor_shape_proto",
         ":types_proto",
+        "//tensorflow/tsl/protobuf:histogram_proto",
     ],
+    exports = ["//tensorflow/tsl/protobuf:histogram_proto"],
 )
 
 tf_proto_library(
@@ -1733,6 +1799,9 @@ tf_proto_library(
     srcs = ["dataset_options.proto"],
     cc_api_version = 2,
     make_default_target_header_only = True,
+    protodeps = [
+        ":model_proto",
+    ],
 )
 
 tf_proto_library(

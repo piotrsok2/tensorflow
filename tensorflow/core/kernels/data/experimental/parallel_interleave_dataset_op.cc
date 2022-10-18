@@ -131,7 +131,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
     params.op_version = op_version_;
     bool deterministic =
         deterministic_.IsDeterministic() || deterministic_.IsDefault();
-    return absl::make_unique<Iterator>(
+    return std::make_unique<Iterator>(
         Iterator::Params{
             this, name_utils::IteratorPrefix(kDatasetType, prefix, params)},
         deterministic);
@@ -151,7 +151,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
 
   Status InputDatasets(std::vector<const DatasetBase*>* inputs) const override {
     inputs->push_back(input_);
-    return Status::OK();
+    return OkStatus();
   }
 
   Status CheckExternalState() const override {
@@ -219,7 +219,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
     attrs.emplace_back(kTarguments, other_arguments_types_attr);
 
     TF_RETURN_IF_ERROR(b->AddDataset(this, inputs, list_inputs, attrs, output));
-    return Status::OK();
+    return OkStatus();
   }
 
  private:
@@ -291,7 +291,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
     // TODO(jsimsa): Register cancellation callback once the implementation is
     // refactored not to hold mu_ while calling `GetNext` on the input.
     Status Initialize(IteratorContext* ctx) override {
-      cancellation_manager_ = absl::make_unique<CancellationManager>();
+      cancellation_manager_ = std::make_unique<CancellationManager>();
       IteratorContext::Params params(ctx);
       params.cancellation_manager = cancellation_manager_.get();
       TF_RETURN_IF_ERROR(dataset()->input_->MakeIterator(
@@ -379,7 +379,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
               // `interleave_indices_`.
               interleave_indices_[index] = staging_indices_.front();
               staging_indices_.pop_front();
-
               next_index_ = (index + 1) % interleave_indices_.size();
               block_count_ = 0;
               // Restart the inner [for] loop
@@ -393,7 +392,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         if (!can_produce_elements && !input_impl_) {
           // No potential for future values.
           *end_of_sequence = true;
-          return Status::OK();
+          return OkStatus();
         }
 
         if (must_wait_for_input) {
@@ -414,8 +413,11 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
    protected:
     std::shared_ptr<model::Node> CreateNode(
         IteratorContext* ctx, model::Node::Args args) const override {
-      return model::MakeAsyncInterleaveManyNode(std::move(args),
-                                                /*parameters=*/{});
+      return model::MakeAsyncInterleaveManyNode(
+          std::move(args), {model::MakeNonTunableParameter(
+                                kCycleLength, dataset()->cycle_length_),
+                            model::MakeNonTunableParameter(
+                                kDeterministic, deterministic_ ? 1.0 : 0.0)});
     }
 
     Status SaveInternal(SerializationContext* ctx,
@@ -460,7 +462,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         TF_RETURN_IF_ERROR(
             writer->WriteScalar(prefix(), kWorkerThreadsRunning, ""));
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status RestoreInternal(IteratorContext* ctx,
@@ -492,7 +494,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       }
       std::unique_ptr<thread::ThreadPool> threadpool = ctx->CreateThreadPool(
           "read_worker_thread_state", dataset()->num_threads());
-      Status s = Status::OK();
+      Status s = OkStatus();
       BlockingCounter counter(dataset()->num_threads());
       for (size_t i = 0; i < dataset()->num_threads(); ++i) {
         threadpool->Schedule([this, i, ctx, reader, &s, &counter] {
@@ -564,14 +566,13 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       if (reader->Contains(prefix(), kWorkerThreadsRunning)) {
         worker_threads_.reserve(dataset()->num_threads());
         for (size_t i = 0; i < dataset()->num_threads(); ++i) {
+          std::shared_ptr<IteratorContext> new_ctx(new IteratorContext(*ctx));
           worker_threads_.emplace_back(ctx->StartThread(
               strings::StrCat(kDataParallelInterleaveWorker, "_", i),
-              [this, ctx = std::make_shared<IteratorContext>(*ctx), i]() {
-                WorkerThread(ctx.get(), i);
-              }));
+              [this, new_ctx, i]() { WorkerThread(new_ctx, i); }));
         }
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     TraceMeMetadata GetTraceMeMetadata() const override {
@@ -654,7 +655,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
 
       std::unique_ptr<IteratorBase> iterator;
 
-      WorkerThreadState() : output_elem(Status::OK()) {}
+      WorkerThreadState() : output_elem(OkStatus()) {}
     };
 
     void CancelThreads() TF_LOCKS_EXCLUDED(mu_) {
@@ -676,28 +677,28 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
           Status s = input_impl_->GetNext(ctx, &args, &end_of_input);
           if (end_of_input) {
             input_impl_.reset();
-            return Status::OK();
+            return OkStatus();
           }
-          workers_[i].SetInputs(s, std::move(args));
-          worker_threads_.push_back(ctx->StartThread(
-              strings::StrCat(kDataParallelInterleaveWorker, "_", i),
-              [this, ctx = std::make_shared<IteratorContext>(*ctx), i]() {
-                WorkerThread(ctx.get(), i);
-              }));
           if (i < dataset()->cycle_length_) {
             interleave_indices_.push_back(i);
           } else {
             staging_indices_.push_back(i);
           }
+          workers_[i].SetInputs(s, std::move(args));
+          std::shared_ptr<IteratorContext> new_ctx(new IteratorContext(*ctx));
+          worker_threads_.push_back(ctx->StartThread(
+              strings::StrCat(kDataParallelInterleaveWorker, "_", i),
+              [this, new_ctx, i]() { WorkerThread(new_ctx, i); }));
         }
         DCHECK(interleave_indices_.size() == dataset()->cycle_length_);
         DCHECK(staging_indices_.size() == dataset()->prefetch_input_elements_);
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     // Produces elements into the worker's output buffers.
-    void WorkerThread(IteratorContext* ctx, int64_t thread_index) {
+    void WorkerThread(const std::shared_ptr<IteratorContext>& ctx,
+                      const int64_t thread_index) {
       // Notes on checkpointing thread local state, i.e., `WorkerThreadState`:
       //
       // 1. Any local state that may need to be checkpointed should be kept
@@ -718,11 +719,11 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
 
       // std::function arguments are copy-constructable, so we pass raw
       // pointers, and then immediately wrap them to ensure correct ownership.
-      RecordStart(ctx);
+      RecordStart(ctx.get());
       auto cleanup = gtl::MakeCleanup([this, thread_index, ctx] {
         mutex_lock l(mu_);
         workers_[thread_index].cond_var.notify_all();
-        RecordStop(ctx);
+        RecordStop(ctx.get());
       });
       bool make_new_iterator;
       {
@@ -736,6 +737,9 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
             worker_thread_states_[thread_index].iterator == nullptr &&
             worker_thread_states_[thread_index].iterator_creation_status.ok();
       }
+
+      bool thread_potentially_in_staging = true;
+
       // Even though `make_new_iterator` has cached values from
       // `worker_thread_states_[thread_index]` which is guarded by ckpt_mu_,
       // it is safe to *read* `make_new_iterator`outside of a lock without
@@ -759,9 +763,9 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
           if (read_new_input) {
             mutex_lock l(mu_);
             while (!cancelled_ && !workers_[thread_index].is_producing) {
-              RecordStop(ctx);
+              RecordStop(ctx.get());
               workers_[thread_index].cond_var.wait(l);
-              RecordStart(ctx);
+              RecordStart(ctx.get());
             }
             if (cancelled_) return;
             // Copy the input tensors so that we do not need to block on `mu_`
@@ -777,13 +781,18 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
             // CHECKPOINT_MARKER_A
             // We have the input tensors but have not built the iterator yet.
           }
-
+          {
+            mutex_lock l(mu_);
+            thread_potentially_in_staging =
+                absl::c_find(staging_indices_, thread_index) !=
+                staging_indices_.end();
+          }
           // 1b. Run the user defined function to produce a new iterator.
           {
             tf_shared_lock l(ckpt_mu_);
             worker_thread_states_[thread_index].iterator_creation_status =
                 MakeIteratorFromInputElement(
-                    ctx, this, worker_thread_states_[thread_index].input,
+                    ctx.get(), this, worker_thread_states_[thread_index].input,
                     thread_index, *instantiated_captured_func_, prefix(),
                     &worker_thread_states_[thread_index].iterator,
                     model_node());
@@ -791,6 +800,13 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
                 worker_thread_states_[thread_index].iterator_creation_status;
             if (!iterator_creation_status.ok()) {
               worker_thread_states_[thread_index].input.clear();
+            } else if (thread_potentially_in_staging) {
+              // Disable auto tune modeling while we are paused.
+              // TODO(wilsin): Write a unit test where we iterate through a
+              // dataset, pause, and check the model proto autotune value.
+              DisableAutotune(
+                  ctx.get(),
+                  worker_thread_states_[thread_index].iterator.get());
             }
             // CHECKPOINT_MARKER_B
             // Either an iterator has been successfully built and placed in
@@ -812,16 +828,16 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
           // Wait for space in the prefetch queue.
           while (!cancelled_ && workers_[thread_index].outputs.size() ==
                                     dataset()->buffer_output_elements_) {
-            RecordStop(ctx);
+            RecordStop(ctx.get());
             workers_[thread_index].cond_var.wait(l);
-            RecordStart(ctx);
+            RecordStart(ctx.get());
           }
           if (cancelled_) return;
           tf_shared_lock ckpt_l(ckpt_mu_);
           workers_[thread_index].outputs.emplace_back(iterator_creation_status);
           workers_[thread_index].is_producing = false;
           worker_thread_states_[thread_index].iterator_creation_status =
-              Status::OK();
+              OkStatus();
           // CHECKPOINT_MARKER_C
           // Non-OK iterator creation status has been notified to the
           // client.
@@ -833,6 +849,21 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         } else {
           bool end_of_sequence = false;
           while (!end_of_sequence) {
+            if (thread_potentially_in_staging) {
+              // Check whether we have left the staging state and reenable
+              // auto tune modeling.
+              mutex_lock l(mu_);
+              thread_potentially_in_staging =
+                  absl::c_find(staging_indices_, thread_index) !=
+                  staging_indices_.end();
+              if (!thread_potentially_in_staging) {
+                tf_shared_lock l(ckpt_mu_);
+                EnableAutotune(
+                    ctx.get(),
+                    worker_thread_states_[thread_index].iterator.get());
+              }
+            }
+
             // 3.a Produce an element!
             {
               tf_shared_lock ckpt_l(ckpt_mu_);
@@ -851,7 +882,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
                     profiler::kInfo);
                 worker_thread_states_[thread_index].output_elem.status =
                     worker_thread_states_[thread_index].iterator->GetNext(
-                        ctx,
+                        ctx.get(),
                         &worker_thread_states_[thread_index].output_elem.output,
                         &worker_thread_states_[thread_index].end_of_sequence);
                 end_of_sequence =
@@ -873,9 +904,9 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
               // Wait for space in the prefetch queue.
               while (!cancelled_ && workers_[thread_index].outputs.size() ==
                                         dataset()->buffer_output_elements_) {
-                RecordStop(ctx);
+                RecordStop(ctx.get());
                 workers_[thread_index].cond_var.wait(l);
-                RecordStart(ctx);
+                RecordStart(ctx.get());
               }
               if (cancelled_) return;
 
@@ -898,7 +929,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
                     worker_thread_states_[thread_index].output_elem.output);
               }
               worker_thread_states_[thread_index].output_elem.status =
-                  Status::OK();
+                  OkStatus();
               if (deterministic_) {
                 workers_[thread_index].cond_var.notify_one();
               } else {
@@ -935,7 +966,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         TF_RETURN_IF_ERROR(
             writer->WriteScalar(iterator_name, kIsProducing, ""));
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status ReadWorkerStateLocked(IteratorContext* ctx,
@@ -958,7 +989,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       TF_RETURN_IF_ERROR(
           reader->ReadScalar(worker_prefix, kOutputsSize, &outputs_size));
       for (int i = 0; i < outputs_size; ++i) {
-        workers_[index].outputs.emplace_back(Status::OK());
+        workers_[index].outputs.emplace_back(OkStatus());
         TF_RETURN_IF_ERROR(ReadOutputElemLocked(
             ctx, reader, &workers_[index].outputs.back(), worker_prefix,
             strings::StrCat(kOutputs, "_", i)));
@@ -968,7 +999,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       } else {
         workers_[index].is_producing = false;
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status WriteWorkerThreadStateLocked(SerializationContext* ctx,
@@ -1001,7 +1032,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         TF_RETURN_IF_ERROR(
             writer->WriteScalar(iterator_name, kEndOfSequence, ""));
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status ReadWorkerThreadStateLocked(IteratorContext* ctx,
@@ -1042,7 +1073,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       } else {
         state->end_of_sequence = false;
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status WriteOutputElemLocked(IteratorStateWriter* writer,
@@ -1061,7 +1092,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
             iterator_name, strings::StrCat(prefix, "_", kOutput, "_", i),
             output_elem.output[i]));
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status ReadOutputElemLocked(IteratorContext* ctx,
@@ -1084,7 +1115,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
                                strings::StrCat(prefix, "_", kOutput, "_", i),
                                &output_elem->output.back()));
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status WriteStatusLocked(IteratorStateWriter* writer,
@@ -1099,7 +1130,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
             iterator_name, strings::StrCat(prefix, "_", KMessage),
             status.error_message()));
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status ReadStatusLocked(IteratorStateReader* reader,
@@ -1117,9 +1148,9 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
             &error_message));
         *status = Status(code, error_message);
       } else {
-        *status = Status::OK();
+        *status = OkStatus();
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     // Mutex & condition variable to guard mutable iterator internals and

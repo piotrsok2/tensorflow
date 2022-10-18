@@ -353,7 +353,8 @@ absl::optional<uint64_t> VerifyAndCountSparseElements(const Tensor& tensor) {
     }
     int block_dim_size =
         sparsity->dim_metadata()->Get(i + original_rank)->dense_size();
-    if (block_dim_size == 0) {
+    // If size is <= 0 we just return as it is invalid.
+    if (block_dim_size <= 0) {
       return absl::nullopt;
     }
 
@@ -417,6 +418,12 @@ bool VerifyNumericTensorBuffer(const Tensor& tensor, const Buffer& buffer,
     case TensorType_UINT32:
       bytes_required *= sizeof(uint32_t);
       break;
+    case TensorType_INT4:
+      // TODO(b/246647008): Multiplying this value by the number of elements
+      // does not yield the size of a tensor when 4-bit values are packed
+      // 2 to a byte.
+      bytes_required *= sizeof(int8_t);
+      break;
     case TensorType_UINT8:
       bytes_required *= sizeof(uint8_t);
       break;
@@ -433,6 +440,9 @@ bool VerifyNumericTensorBuffer(const Tensor& tensor, const Buffer& buffer,
       bytes_required *= sizeof(bool);
       break;
     case TensorType_INT16:
+      bytes_required *= sizeof(uint16_t);
+      break;
+    case TensorType_UINT16:
       bytes_required *= sizeof(uint16_t);
       break;
     case TensorType_COMPLEX64:

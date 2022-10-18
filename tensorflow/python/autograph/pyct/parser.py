@@ -17,12 +17,9 @@
 Adapted from Tangent.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import ast
 import inspect
+import io
 import linecache
 import re
 import sys
@@ -31,7 +28,6 @@ import tokenize
 
 import astunparse
 import gast
-import six
 
 from tensorflow.python.autograph.pyct import errors
 from tensorflow.python.autograph.pyct import inspect_utils
@@ -39,8 +35,6 @@ from tensorflow.python.util import tf_inspect
 
 
 PY2_PREAMBLE = textwrap.dedent("""
-from __future__ import division
-from __future__ import print_function
 """)
 PY3_PREAMBLE = ''
 MAX_SIZE = 0
@@ -71,7 +65,7 @@ def dedent_block(code_string):
 
   code_string = _unfold_continuations(code_string)
 
-  token_gen = tokenize.generate_tokens(six.StringIO(code_string).readline)
+  token_gen = tokenize.generate_tokens(io.StringIO(code_string).readline)
 
   block_indentation = None
   tokens = []

@@ -143,7 +143,8 @@ void SetUniqueGraphNodeName(StringPiece prefix, GraphDef* graph, NodeDef* node);
 
 // Sets the function name using the `prefix` name as a prefix while guaranteeing
 // the name is unique across the function library.
-void SetUniqueGraphFunctionName(StringPiece prefix, FunctionDefLibrary* library,
+void SetUniqueGraphFunctionName(StringPiece prefix,
+                                const FunctionDefLibrary* library,
                                 FunctionDef* function);
 
 // Copies attribute having name `attribute_name` from node `from` to node
@@ -195,8 +196,15 @@ bool CopyShapesAndTypesAttrs(const NodeDef& from, NodeDef* to_node);
 // Checks whether the op has a "sloppy" attribute.
 bool HasSloppyAttr(const string& op);
 
+// Checks whether the op has a "replicate_on_split" attribute.
+bool HasReplicateOnSplitAttr(const string& op);
+
 // Checks whether the op has a "deterministic" attribute.
 bool HasDeterministicAttr(const string& op);
+
+// Sets the `name` as the metadata name of the `node`. It returns an error if
+// the `node` already has a metadata name.
+Status SetMetadataName(const std::string& name, NodeDef* node);
 
 }  // namespace graph_utils
 }  // namespace grappler

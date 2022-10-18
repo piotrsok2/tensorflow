@@ -14,15 +14,10 @@
 # ==============================================================================
 """Registry for tensor conversion functions."""
 # pylint: disable=g-bad-name
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import threading
 
 import numpy as np
-import six
 
 from tensorflow.python.util import lazy_loader
 from tensorflow.python.util.tf_export import tf_export
@@ -40,7 +35,8 @@ _tensor_conversion_func_lock = threading.Lock()
 
 # Instances of these types are always converted using
 # `_default_conversion_function`.
-_UNCONVERTIBLE_TYPES = six.integer_types + (
+_UNCONVERTIBLE_TYPES = (
+    int,
     float,
     np.generic,
     np.ndarray,

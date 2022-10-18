@@ -57,6 +57,9 @@ namespace data {
 
 namespace {
 
+constexpr char kParallelMapDatasetV1[] = "ParallelMapDataset";
+constexpr char kParallelMapDatasetV2[] = "ParallelMapDatasetV2";
+
 constexpr char kComponent[] = "component";
 constexpr char kInvocationResults[] = "invocation_results";
 constexpr char kSize[] = "size";
@@ -77,7 +80,17 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
           DeterminismPolicy deterministic,
           std::unique_ptr<CapturedFunction> captured_func,
           bool preserve_cardinality, int op_version)
-      : DatasetBase(DatasetContext(ctx)),
+      : Dataset(DatasetContext(ctx), input, num_parallel_calls, output_types,
+                output_shapes, deterministic, std::move(captured_func),
+                preserve_cardinality, op_version) {}
+
+  Dataset(DatasetContext dataset_context, const DatasetBase* input,
+          int64_t num_parallel_calls, const DataTypeVector& output_types,
+          const std::vector<PartialTensorShape>& output_shapes,
+          DeterminismPolicy deterministic,
+          std::unique_ptr<CapturedFunction> captured_func,
+          bool preserve_cardinality, int op_version)
+      : DatasetBase(std::move(dataset_context)),
         input_(input),
         num_parallel_calls_(num_parallel_calls),
         output_types_(output_types),
@@ -95,7 +108,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
       const string& prefix) const override {
     name_utils::IteratorPrefixParams params;
     params.op_version = op_version_;
-    return absl::make_unique<Iterator>(Iterator::Params{
+    return std::make_unique<Iterator>(Iterator::Params{
         this, name_utils::IteratorPrefix(kDatasetType, prefix, params)});
   }
 
@@ -112,7 +125,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
                                           params);
   }
 
-  int64_t Cardinality() const override {
+  int64_t CardinalityInternal() const override {
     if (preserve_cardinality_) {
       return input_->Cardinality();
     } else {
@@ -120,9 +133,30 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
     }
   }
 
+  int64_t CardinalityInternal(CardinalityOptions options) const override {
+    if (preserve_cardinality_) {
+      return input_->Cardinality(options);
+    } else {
+      return kUnknownCardinality;
+    }
+  }
+
+  Status Get(OpKernelContext* ctx, int64 index,
+             std::vector<Tensor>* out_tensors) const override {
+    TF_RETURN_IF_ERROR(CheckRandomAccessCompatible(index));
+    std::vector<Tensor> args;
+    TF_RETURN_IF_ERROR(input_->Get(ctx, index, &args));
+    if (!instantiated_captured_func_) {
+      TF_RETURN_IF_ERROR(
+          captured_func_->Instantiate(InstantiateCapturedFunctionParams(ctx),
+                                      &instantiated_captured_func_));
+    }
+    return instantiated_captured_func_->RunInstantiated(args, out_tensors);
+  }
+
   Status InputDatasets(std::vector<const DatasetBase*>* inputs) const override {
     inputs->push_back(input_);
-    return Status::OK();
+    return OkStatus();
   }
 
   Status CheckExternalState() const override {
@@ -194,7 +228,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
          std::make_pair(2, num_parallel_calls)},  // Single tensor inputs.
         {std::make_pair(1, other_arguments)},     // Tensor list inputs.
         attrs, output));
-    return Status::OK();
+    return OkStatus();
   }
 
  private:
@@ -219,10 +253,12 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
 
     Status Initialize(IteratorContext* ctx) override {
       mutex_lock l(*mu_);
+      interleave_depth_ = ctx->interleave_depth();
+
       if (num_parallel_calls_->value == model::kAutotune) {
-        num_parallel_calls_->value = ctx->runner_threadpool_size();
+        num_parallel_calls_->value = GetAutotuneDefaultParallelism(ctx);
       }
-      cancellation_manager_ = absl::make_unique<CancellationManager>();
+      cancellation_manager_ = std::make_unique<CancellationManager>();
       TF_RETURN_IF_ERROR(RegisterCancellationCallback(
           ctx->cancellation_manager(),
           [this]() { CancelThreads(/*wait=*/false); }, &deregister_fn_));
@@ -257,7 +293,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
         return profiler::TraceMeEncode("ParallelMapConsume",
                                        {{"element_id", result->uid}});
       });
-      return ProcessResult(ctx, result.get(), out_tensors, end_of_sequence);
+      return ProcessResult(ctx, result, out_tensors, end_of_sequence);
     }
 
    protected:
@@ -305,7 +341,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
               writer->WriteScalar(element_prefix, kEndOfInput, ""));
         }
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status RestoreInternal(IteratorContext* ctx,
@@ -346,7 +382,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
         RecordBufferEnqueue(ctx, result.return_values);
         result.notification.Notify();
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     TraceMeMetadata GetTraceMeMetadata() const override {
@@ -367,6 +403,9 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
           parallelism == -1
               ? kTraceInfoUnavailable
               : strings::Printf("%lld", static_cast<long long>(parallelism))));
+      result.push_back(std::make_pair(
+          "interleave_depth",
+          strings::Printf("%lld", static_cast<long long>(interleave_depth_))));
       return result;
     }
 
@@ -395,30 +434,30 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
     void EnsureThreadsStarted(IteratorContext* ctx)
         TF_EXCLUSIVE_LOCKS_REQUIRED(*mu_) {
       if (!runner_thread_) {
+        auto ctx_copy = std::make_shared<IteratorContext>(*ctx);
         runner_thread_ = ctx->StartThread(
             "tf_data_parallel_map",
-            [this, ctx = std::make_shared<IteratorContext>(*ctx)]() {
-              RunnerThread(ctx);
-            });
+            std::bind(&Iterator::RunnerThread, this, ctx_copy));
         if (ctx->stats_aggregator()) {
           stats_thread_ = ctx->StartThread(
               "tf_data_parallel_map_stats",
-              [this, ctx = std::make_shared<IteratorContext>(*ctx)]() {
-                StatsThread(ctx.get());
-              });
+              std::bind(&Iterator::StatsThread, this, ctx_copy));
         }
       }
     }
 
-    void CallCompleted(InvocationResult* result) TF_LOCKS_EXCLUDED(*mu_) {
+    void CallCompleted(const std::shared_ptr<IteratorContext>& ctx,
+                       const std::shared_ptr<InvocationResult>& result)
+        TF_LOCKS_EXCLUDED(*mu_) {
       mutex_lock l(*mu_);
       num_calls_--;
       result->notification.Notify();
       cond_var_->notify_all();
     }
 
-    void CallFunction(std::shared_ptr<IteratorContext> ctx,
-                      InvocationResult* result) TF_LOCKS_EXCLUDED(*mu_) {
+    void CallFunction(const std::shared_ptr<IteratorContext>& ctx,
+                      const std::shared_ptr<InvocationResult>& result)
+        TF_LOCKS_EXCLUDED(*mu_) {
       profiler::TraceMe traceme([&] {
         return profiler::TraceMeEncode("ParallelMapProduce",
                                        {{"element_id", result->uid}});
@@ -428,14 +467,14 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
       result->status = input_impl_->GetNext(ctx.get(), &input_element,
                                             &result->end_of_input);
       if (result->end_of_input || !result->status.ok()) {
-        CallCompleted(result);
+        CallCompleted(ctx, result);
         return;
       }
 
       auto done = [this, ctx, result](Status status) {
         result->status.Update(status);
         RecordBufferEnqueue(ctx.get(), result->return_values);
-        CallCompleted(result);
+        CallCompleted(ctx, result);
       };
 
       // Apply the map function on `input_element`, storing the result in
@@ -472,14 +511,15 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
       }
     }
 
-    Status ProcessResult(IteratorContext* ctx, InvocationResult* result,
+    Status ProcessResult(IteratorContext* ctx,
+                         const std::shared_ptr<InvocationResult>& result,
                          std::vector<Tensor>* out_tensors,
                          bool* end_of_sequence) TF_LOCKS_EXCLUDED(*mu_) {
       if (!result->end_of_input && result->status.ok()) {
         *out_tensors = std::move(result->return_values);
         RecordBufferDequeue(ctx, *out_tensors);
         *end_of_sequence = false;
-        return Status::OK();
+        return OkStatus();
       }
       if (errors::IsOutOfRange(result->status)) {
         if (preserve_cardinality_) {
@@ -493,14 +533,14 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
           // `f` may deliberately raise `errors::OutOfRange` to indicate
           // that we should terminate the iteration early.
           *end_of_sequence = true;
-          return Status::OK();
+          return OkStatus();
         }
       }
       *end_of_sequence = result->end_of_input;
       return result->status;
     }
 
-    void RunnerThread(std::shared_ptr<IteratorContext> ctx)
+    void RunnerThread(const std::shared_ptr<IteratorContext>& ctx)
         TF_LOCKS_EXCLUDED(*mu_) {
       RecordStart(ctx.get());
       auto cleanup = gtl::MakeCleanup([this, ctx] { RecordStop(ctx.get()); });
@@ -533,13 +573,13 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
           cond_var_->notify_all();
         }
         for (const auto& call : new_calls) {
-          CallFunction(ctx, call.get());
+          CallFunction(ctx, call);
         }
         new_calls.clear();
       }
     }
 
-    // Determines whether the caller needs to wait for a result-> Upon returning
+    // Determines whether the caller needs to wait for a result. Upon returning
     // false, `result` will point to the result.
     bool ShouldWait(std::shared_ptr<InvocationResult>* result)
         TF_EXCLUSIVE_LOCKS_REQUIRED(*mu_) {
@@ -571,7 +611,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
       return true;
     }
 
-    void StatsThread(IteratorContext* ctx) {
+    void StatsThread(const std::shared_ptr<IteratorContext>& ctx) {
       for (int64_t step = 0;; ++step) {
         int num_calls;
         int num_parallel_calls;
@@ -608,7 +648,7 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
         TF_RETURN_IF_ERROR(
             writer->WriteScalar(key, kErrorMessage, status.error_message()));
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     Status ReadStatusLocked(IteratorStateReader* reader, const std::string& key,
@@ -623,9 +663,9 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
             reader->ReadScalar(key, kErrorMessage, &error_message));
         *status = Status(code, error_message);
       } else {
-        *status = Status::OK();
+        *status = OkStatus();
       }
-      return Status::OK();
+      return OkStatus();
     }
 
     // Used for coordination between the main thread and the runner thread.
@@ -653,12 +693,18 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
     // Buffer for storing the invocation results.
     std::deque<std::shared_ptr<InvocationResult>> invocation_results_
         TF_GUARDED_BY(*mu_);
+    bool cancelled_ TF_GUARDED_BY(*mu_) = false;
     std::unique_ptr<Thread> runner_thread_ TF_GUARDED_BY(*mu_);
     std::unique_ptr<Thread> stats_thread_ TF_GUARDED_BY(*mu_);
-    bool cancelled_ TF_GUARDED_BY(*mu_) = false;
 
     // Method for deregistering the cancellation callback.
     std::function<void()> deregister_fn_;
+
+    // Records the number of ParallelInterleave operations in the path from the
+    // root node to this node (not including this node) in the input pipeline
+    // tree. We record the interleave depth so that it can be included in the
+    // trace metadata.
+    int64 interleave_depth_ = -1;
   };
 
   const DatasetBase* const input_;
@@ -669,6 +715,9 @@ class ParallelMapDatasetOp::Dataset : public DatasetBase {
   const bool preserve_cardinality_;
   const std::unique_ptr<CapturedFunction> captured_func_;
   const int op_version_;
+  // This is used for random access provided by Get().
+  mutable std::unique_ptr<InstantiatedCapturedFunction>
+      instantiated_captured_func_;
 };
 
 ParallelMapDatasetOp::ParallelMapDatasetOp(OpKernelConstruction* ctx)
@@ -723,11 +772,7 @@ void ParallelMapDatasetOp::MakeDataset(OpKernelContext* ctx, DatasetBase* input,
                                           &captured_func));
 
   if (num_parallel_calls == model::kAutotune) {
-    if (GetExperiments().contains("max_parallelism")) {
-      num_parallel_calls = GetCpuBudget();
-    } else {
-      metrics::RecordTFDataAutotune(kDatasetType);
-    }
+    metrics::RecordTFDataAutotune(kDatasetType);
   }
 
   *output =
@@ -736,13 +781,28 @@ void ParallelMapDatasetOp::MakeDataset(OpKernelContext* ctx, DatasetBase* input,
                   preserve_cardinality_, op_version_);
 }
 
+std::unique_ptr<DatasetBase> MakeDataServiceUncompressDataset(
+    DatasetBase* input, std::unique_ptr<CapturedFunction> captured_function,
+    const DataTypeVector& output_types,
+    const std::vector<PartialTensorShape>& output_shapes) {
+  DatasetContext::Params param;
+  param.type_string = kParallelMapDatasetV2;
+  param.node_name = kParallelMapDatasetV2;
+  return std::make_unique<ParallelMapDatasetOp::Dataset>(
+      DatasetContext(std::move(param)), input,
+      /*num_parallel_calls=*/model::kAutotune, output_types, output_shapes,
+      DeterminismPolicy(DeterminismPolicy::Type::kDefault),
+      std::move(captured_function),
+      /*preserve_cardinality=*/true, /*op_version=*/2);
+}
+
 namespace {
-REGISTER_KERNEL_BUILDER(Name("ParallelMapDataset").Device(DEVICE_CPU),
+REGISTER_KERNEL_BUILDER(Name(kParallelMapDatasetV1).Device(DEVICE_CPU),
                         ParallelMapDatasetOp);
-REGISTER_KERNEL_BUILDER(Name("ParallelMapDatasetV2").Device(DEVICE_CPU),
+REGISTER_KERNEL_BUILDER(Name(kParallelMapDatasetV2).Device(DEVICE_CPU),
                         ParallelMapDatasetOp);
-REGISTER_INPUT_COLOCATION_EXEMPTION("ParallelMapDataset");
-REGISTER_INPUT_COLOCATION_EXEMPTION("ParallelMapDatasetV2");
+REGISTER_INPUT_COLOCATION_EXEMPTION(kParallelMapDatasetV1);
+REGISTER_INPUT_COLOCATION_EXEMPTION(kParallelMapDatasetV2);
 }  // namespace
 }  // namespace data
 }  // namespace tensorflow

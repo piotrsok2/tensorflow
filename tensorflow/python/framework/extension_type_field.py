@@ -24,7 +24,6 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import immutable_dict
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
-from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import type_spec
 from tensorflow.python.util import type_annotations
 
@@ -106,7 +105,7 @@ class ExtensionTypeField(
     try:
       validate_field_value_type(value_type, allow_forward_references=True)
     except TypeError as e:
-      raise TypeError(f'In field {name!r}: {e}')
+      raise TypeError(f'In field {name!r}: {e}') from e
 
     if default is not cls.NO_DEFAULT:
       default = _convert_value(default, value_type,
@@ -146,12 +145,11 @@ def validate_field_value_type(value_type,
                     dtypes.DType):
     return
   elif (value_type in (ops.Tensor, tensor_shape.TensorShape) or
-        isinstance(value_type, type_spec.TypeSpec) or
         (isinstance(value_type, type) and
          issubclass(value_type, composite_tensor.CompositeTensor))):
     if in_mapping_key:
-      raise TypeError(
-          f"Mapping had a key with type '{type(value_type).__name__}'")
+      raise TypeError(f"Mapping had a key '{value_type.__name__}' with type "
+                      f"'{type(value_type).__name__}'")
   elif (type_annotations.is_generic_tuple(value_type) or
         type_annotations.is_generic_union(value_type)):
     type_args = type_annotations.get_generic_type_args(value_type)
@@ -209,11 +207,11 @@ def convert_fields(fields, field_values):
 def convert_fields_for_spec(fields, field_values):
   """Type-checks and converts field values for a TypeSpec (in place).
 
-  This is similar to `convert_fields`, except that we expect a TypeSpec
-  for tensor-like types.  In particular, if the `value_type` of a field
-  specifies a tensor-like type (tf.Tensor, CompositeTensor, or TypeSpec),
-  then the corresponding value in `fields` is expected to contain a TypeSpec
-  (rather than a value described by that TypeSpec).
+  This is similar to `convert_fields`, except that we expect a `TypeSpec` for
+  tensor-like types.  In particular, if the `value_type` of a field is
+  `tf.Tensor` or a `CompositeTensor` subclass, then the corresponding value in
+  `fields` is expected to contain a `TypeSpec` (rather than a value described by
+  that `TypeSpec`).
 
   Args:
     fields: A list of `ExtensionTypeField` objects.
@@ -281,10 +279,6 @@ def _convert_value(value, expected_type, path,
 
   if expected_type is ops.Tensor:
     return _convert_tensor(value, path, context)
-  elif isinstance(expected_type, tensor_spec.TensorSpec):
-    return _convert_tensor_spec(value, expected_type, path, context)
-  elif isinstance(expected_type, type_spec.TypeSpec):
-    return _convert_type_spec(value, expected_type, path, context)
   elif (isinstance(expected_type, type) and
         issubclass(expected_type, composite_tensor.CompositeTensor)):
     return _convert_composite_tensor(value, expected_type, path, context)
@@ -319,7 +313,8 @@ def _convert_value(value, expected_type, path,
 def _convert_tensor(value, path, context):
   """Converts `value` to a `Tensor`."""
   if context == _ConversionContext.SPEC:
-    if not isinstance(value, tensor_spec.TensorSpec):
+    if not (isinstance(value, type_spec.TypeSpec) and
+            value.value_type is ops.Tensor):
       raise TypeError(f'{"".join(path)}: expected a TensorSpec, got {value!r}')
     return value
 
@@ -334,43 +329,6 @@ def _convert_tensor(value, path, context):
     except (ValueError, TypeError) as e:
       raise TypeError(f'{"".join(path)}: expected a Tensor, '
                       f'got {value!r}') from e
-  return value
-
-
-def _convert_tensor_spec(value, expected_type, path, context):
-  """Converts `value` to a Tensor comptible with TensorSpec expected_type."""
-  if context == _ConversionContext.SPEC:
-    if not (isinstance(value, tensor_spec.TensorSpec) and
-            expected_type.is_compatible_with(value)):
-      raise TypeError(f'{"".join(path)}: expected a TensorSpec compatible '
-                      f'with {expected_type}, got {value!r}')
-    return value
-
-  if not isinstance(value, ops.Tensor):
-    try:
-      value = ops.convert_to_tensor(value, expected_type.dtype)
-    except (ValueError, TypeError):
-      raise TypeError(f'{"".join(path)}: expected a {expected_type.dtype!r} '
-                      f'Tensor, got {value!r}')
-  if not expected_type.is_compatible_with(value):
-    raise TypeError(f'{"".join(path)}: expected a Tensor compatible with '
-                    f'{expected_type}, got {value!r}')
-  return value
-
-
-def _convert_type_spec(value, expected_type, path, context):
-  """Converts `value` to a value comptible with TypeSpec `expected_type`."""
-  if context == _ConversionContext.SPEC:
-    if not (isinstance(value, type_spec.TypeSpec) and
-            expected_type.is_compatible_with(value)):
-      raise TypeError(f'{"".join(path)}: expected a TypeSpec compatible '
-                      f'with {expected_type}, got {value!r}')
-    return value
-
-  if (isinstance(value, type_spec.TypeSpec) or
-      not expected_type.is_compatible_with(value)):
-    raise TypeError(f'{"".join(path)}: expected {expected_type!r}, '
-                    f'got {value!r}')
   return value
 
 

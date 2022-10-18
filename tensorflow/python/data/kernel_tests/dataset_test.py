@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for `tf.data.Dataset`."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import os
 import warnings
@@ -404,9 +400,9 @@ class DatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
   def testSameGraphErrorOneShot(self):
     dataset = dataset_ops.Dataset.range(10)
     with ops.Graph().as_default():
-      with self.assertRaisesRegex(
-          ValueError, "Please ensure that all datasets in the pipeline are "
-          "created in the same graph as the iterator."):
+      with self.assertRaisesRegex(ValueError,
+                                  "make sure that the dataset is created in "
+                                  "the same graph as the iterator"):
         _ = dataset_ops.make_one_shot_iterator(dataset)
 
   @combinations.generate(
@@ -414,9 +410,9 @@ class DatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
   def testSameGraphErrorInitializable(self):
     dataset = dataset_ops.Dataset.range(10)
     with ops.Graph().as_default():
-      with self.assertRaisesRegex(
-          ValueError, "Please ensure that all datasets in the pipeline are "
-          "created in the same graph as the iterator."):
+      with self.assertRaisesRegex(ValueError,
+                                  "make sure that the dataset is created in "
+                                  "the same graph as the iterator"):
         _ = dataset_ops.make_initializable_iterator(dataset)
 
   @combinations.generate(
@@ -568,7 +564,7 @@ class DatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
     else:
       iterator = dataset_ops.make_one_shot_iterator(dataset)
       next_first, next_second = iterator.get_next()
-      self.assertEqual(next_second, None)
+      self.assertIsNone(next_second)
       with self.cached_session() as sess:
         self.assertEqual(sess.run(next_first), 42)
 
@@ -653,12 +649,35 @@ class DebugDatasetTest(test_base.DatasetTestBase, parameterized.TestCase):
     self.assertLen(counter, 11)
 
   @combinations.generate(test_base.eager_only_combinations())
+  def testDebugModeGenerator(self):
+    def gen():
+      yield from range(10)
+
+    ds = dataset_ops.Dataset.from_generator(
+        gen,
+        output_signature=tensor_spec.TensorSpec(shape=(), dtype=dtypes.int64))
+    self.assertDatasetProduces(ds, list(range(10)))
+
+  @combinations.generate(test_base.eager_only_combinations())
+  def testDebugModeGeneratorTwoComponents(self):
+    data = [(n, n+1) for n in range(10)]
+
+    def gen():
+      yield from data
+
+    ds = dataset_ops.Dataset.from_generator(
+        gen,
+        output_signature=(tensor_spec.TensorSpec(shape=(), dtype=dtypes.int64),
+                          tensor_spec.TensorSpec(shape=(), dtype=dtypes.int64)))
+    self.assertDatasetProduces(ds, data)
+
+  @combinations.generate(test_base.eager_only_combinations())
   def testDebugModeSequentialExecution(self):
     ds = dataset_ops.Dataset.range(10)
     ds = ds.apply(
         testing.assert_next(["Interleave", "Map", "Batch", "FiniteTake"]))
     ds = ds.interleave(
-        lambda x: dataset_ops.Dataset.from_tensors(x),
+        dataset_ops.Dataset.from_tensors,
         cycle_length=10,
         num_parallel_calls=10)
     ds = ds.map(lambda x: x * x, num_parallel_calls=10)
